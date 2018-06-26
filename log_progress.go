@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"net/url"
+	"github.com/influxdata/influxdb/client/v2"
 )
 
 type Reader interface {
@@ -48,8 +49,10 @@ type Message struct {
 func (r * ReadFromFile) Read (rc chan []byte) {
 	f, err := os.Open(r.path)
 	if err != nil {
-		panic(fmt.Sprintln("open file error:%s", err.Error()))
+		panic(fmt.Sprintf("open file error:%s", err.Error()))
 	}
+
+	strconv.ParseInt("12", 64, 64)
 
 	f.Seek(0, 2)
 	// 从日志文件末尾开始逐行读取内容
@@ -67,8 +70,54 @@ func (r * ReadFromFile) Read (rc chan []byte) {
 }
 
 func (w *WriteToInfluxDB) Write(wc chan *Message)  {
+	infSli := strings.Split(w.influxDBsn, "@")
+
+	// Create a new HTTPClient
+	c, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr:     infSli[0],
+		Username: infSli[1],
+		Password: infSli[2],
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+
+
 	for v := range wc {
-		fmt.Println(v)
+		// Create a new point batch
+		bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+			Database:  infSli[3],
+			Precision: infSli[4],
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Create a point and add to batch
+		tags := map[string]string{"Path": v.Path, "Method": v.Method, "Scheme": v.Scheme, "Status": v.Status}
+		fields := map[string]interface{}{
+			"UpstreamTime":   v.UpstreamTime,
+			"RequestTime": v.RequestTime,
+			"BytesSent":   v.BytesSent,
+		}
+
+		pt, err := client.NewPoint("nginx_log", tags, fields, v.TimeLocal)
+		if err != nil {
+			log.Fatal(err)
+		}
+		bp.AddPoint(pt)
+
+		// Write the batch
+		if err := c.Write(bp); err != nil {
+			log.Fatal(err)
+		}
+
+		// Close client resources
+		if err := c.Close(); err != nil {
+			log.Fatal(err)
+		}
+		log.Println("write success!")
 	}
 }
 
@@ -81,9 +130,9 @@ func (lp *logProgress) Progress() {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
 	for v := range lp.rc {
 		ret := r.FindStringSubmatch(string(v))
-		log.Println(len(ret))
+
 		if len(ret) !=14 {
-			log.Println("FindStringSubmatch fail:", string(v))
+			log.Println("FindStringSubmatch fail:", string(3))
 			continue
 		}
 		message := &Message{}
@@ -111,6 +160,7 @@ func (lp *logProgress) Progress() {
 		requestTime, _ := strconv.ParseFloat(ret[13], 64)
 		message.UpstreamTime = upstreamTime
 		message.RequestTime = requestTime
+		lp.wc <- message
 	}
 }
 
@@ -119,7 +169,7 @@ func main() {
 		path: "./access.log",
 	}
 	w := WriteToInfluxDB{
-		influxDBsn: "test",
+		influxDBsn: "http://127.0.0.1:8086@admin@s799416774@log_analyse@s",
 	}
 	lp := logProgress{
 		rc: make(chan []byte),
